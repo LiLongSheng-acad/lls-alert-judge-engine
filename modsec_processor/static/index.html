@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>告警研判引擎</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/css/style.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container-fluid py-4" id="app">
+        <!-- 标题 -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1 class="h3">🛡️ 告警研判引擎</h1>
+            <div class="d-flex align-items-center gap-2">
+                <div class="dropdown d-inline-block">
+                    <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                        👤 <span id="currentUserDisplay">system</span>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                        <li><a class="dropdown-item" href="#" onclick="switchUser('zhangsan')">张三 (zhangsan)</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="switchUser('lisi')">李四 (lisi)</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="switchUser('wangwu')">王五 (wangwu)</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="#" onclick="switchUser(prompt('输入用户名:'))">自定义...</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="switchUser('admin')">管理员 (admin)</a></li>
+                    </ul>
+                </div>
+                <span class="badge bg-secondary me-2" id="modeBadge">监控模式</span>
+                <button class="btn btn-outline-primary btn-sm" onclick="refreshData()">🔄 刷新</button>
+            </div>
+        </div>
+
+        <!-- Tab 导航 -->
+        <ul class="nav nav-tabs mb-3" id="mainTabs" role="tablist">
+            <li class="nav-item"><button class="nav-link active" id="alerts-tab" data-bs-toggle="tab" data-bs-target="#alerts-pane" type="button" role="tab">📋 告警列表</button></li>
+            <li class="nav-item"><button class="nav-link" id="rules-tab" data-bs-toggle="tab" data-bs-target="#rules-pane" type="button" role="tab">⚙️ 规则管理</button></li>
+            <li class="nav-item"><button class="nav-link" id="assets-tab" data-bs-toggle="tab" data-bs-target="#assets-pane" type="button" role="tab">🏷️ 资产管理</button></li>
+            <li class="nav-item"><button class="nav-link" id="history-tab" data-bs-toggle="tab" data-bs-target="#history-pane" type="button" role="tab">📜 操作历史</button></li>
+        </ul>
+
+        <div class="tab-content">
+            <!-- 各 Tab 内容由 JS 动态渲染 -->
+            <div class="tab-pane fade show active" id="alerts-pane" role="tabpanel"></div>
+            <div class="tab-pane fade" id="rules-pane" role="tabpanel"></div>
+            <div class="tab-pane fade" id="assets-pane" role="tabpanel"></div>
+            <div class="tab-pane fade" id="history-pane" role="tabpanel"></div>
+        </div>
+    </div>
+
+    <!-- ======================== 弹窗 ======================== -->
+    <div class="modal fade" id="detailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg detail-modal">
+            <div class="modal-content">
+                <div class="modal-header"><h5 class="modal-title">告警详情</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body" id="detailBody">加载中...</div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 沉底弹窗（统一） -->
+    <div class="modal fade" id="sinkModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="sinkModalTitle">沉底操作</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="sinkAlertId">
+                    <input type="hidden" id="sinkTarget">
+                    <input type="hidden" id="sinkMode" value="single">
+
+                    <div class="mb-3">
+                        <label class="form-label">操作确认</label>
+                        <div id="sinkAlertPreview" class="small text-muted">加载中...</div>
+                    </div>
+
+                    <!-- 单选框：仅在单条沉底时显示 -->
+                    <div class="mb-3 sink-mode-options">
+                        <label class="form-label">处置方式</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="sinkModeRadio" id="sinkModeSingle" value="single" checked>
+                            <label class="form-check-label" for="sinkModeSingle">仅沉底本条告警</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="sinkModeRadio" id="sinkModeIpTemp" value="ip_temp">
+                            <label class="form-check-label" for="sinkModeIpTemp">IP临时沉底（沉底该IP所有告警）</label>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">原因 <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="sinkReason" placeholder="请填写沉底原因（必填）" required>
+                    </div>
+
+                    <div class="mb-3" id="sinkRuleSyncWrapper" style="display:none;">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="sinkCreateRule" checked>
+                            <label class="form-check-label" for="sinkCreateRule">同步到临时规则（24小时，仅个人）</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-danger" onclick="confirmSink()">确认沉底</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="createRuleModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header"><h5 class="modal-title">新建沉底规则</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">快速模板</label>
+                        <select class="form-select" id="ruleTemplate" onchange="applyTemplate()">
+                            <option value="">-- 选择模板 --</option>
+                            <option value='{"field":"uri","operator":"contains","value":"/health"}'>忽略健康检查 (/health)</option>
+                            <option value='{"field":"uri","operator":"contains","value":"/metrics"}'>忽略指标接口 (/metrics)</option>
+                            <option value='{"field":"uri","operator":"endswith","value":".css"}'>忽略静态CSS</option>
+                            <option value='{"field":"uri","operator":"endswith","value":".js"}'>忽略静态JS</option>
+                            <option value='{"field":"user_agent","operator":"contains","value":"bot"}'>忽略爬虫 (bot)</option>
+                            <option value='{"field":"user_agent","operator":"contains","value":"curl"}'>忽略 curl</option>
+                            <option value='{"field":"src_ip","operator":"exact","value":"127.0.0.1"}'>忽略本地回环</option>
+                        </select>
+                    </div>
+                    <form id="createRuleForm">
+                        <div class="mb-3"><label class="form-label">匹配字段</label>
+                            <select class="form-select" id="ruleField" required>
+                                <option value="uri">URI</option><option value="src_ip">源IP</option>
+                                <option value="user_agent">User-Agent</option><option value="method">请求方法</option>
+                                <option value="attack_type">攻击类型</option>
+                            </select>
+                        </div>
+                        <div class="mb-3"><label class="form-label">操作符</label>
+                            <select class="form-select" id="ruleOperator" required>
+                                <option value="contains">包含 (contains)</option><option value="startswith">前缀匹配 (startswith)</option>
+                                <option value="endswith">后缀匹配 (endswith)</option><option value="exact">精确匹配 (exact)</option>
+                                <option value="regex">正则匹配 (regex)</option>
+                            </select>
+                        </div>
+                        <div class="mb-3"><label class="form-label">匹配值</label>
+                            <input type="text" class="form-control" id="ruleValue" placeholder="支持单个IP 或 网段(如 10.0.0.0/8)" required>
+                        </div>
+                        <div class="mb-3"><label class="form-label">作用域</label>
+                            <select class="form-select" id="ruleScope" required>
+                                <option value="personal">个人 (personal)</option>
+                                <option value="global">全局 (global)</option>
+                            </select>
+                        </div>
+                        <div class="mb-3"><label class="form-label">过期时间（最大24小时）</label><input type="datetime-local" class="form-control" id="ruleExpireAt" required></div>
+                        <div class="mb-3"><label class="form-label">原因</label><input type="text" class="form-control" id="ruleReason" placeholder="例如: 健康检查误报" required></div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" onclick="confirmCreateRule()">确认创建</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="assetModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header"><h5 class="modal-title" id="assetModalTitle">新增资产</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body">
+                    <input type="hidden" id="editAssetId">
+                    <div class="mb-3"><label class="form-label">资产标识 <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="assetIdentifier" placeholder="例如: 192.168.1.0/24 或 www.test.com" required>
+                    </div>
+                    <div class="mb-3"><label class="form-label">资产名称 <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="assetName" placeholder="例如: 核心支付系统" required>
+                    </div>
+                    <div class="mb-3"><label class="form-label">基础权重 <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" id="assetBaseWeight" value="1.0" step="0.1" min="0.1" max="100" required>
+                    </div>
+                    <div class="mb-3"><label class="form-label">临时权重</label>
+                        <input type="number" class="form-control" id="assetTempWeight" step="0.1" min="0.1" max="100" placeholder="留空表示不使用">
+                    </div>
+                    <div class="mb-3"><label class="form-label">临时权重过期时间</label>
+                        <input type="datetime-local" class="form-control" id="assetTempExpireAt">
+                    </div>
+                    <div class="mb-3"><label class="form-label">负责人</label><input type="text" class="form-control" id="assetOwner" placeholder="业务负责人姓名"></div>
+                    <div class="mb-3"><label class="form-label">备注</label><input type="text" class="form-control" id="assetRemark" placeholder="例如: 生产环境"></div>
+                    <div class="mb-3"><label class="form-label">状态</label>
+                        <select class="form-select" id="assetEnabled"><option value="true">启用</option><option value="false">禁用</option></select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" onclick="confirmAssetSave()">确认保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 1. 基础库 -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/alerts/stats.js"></script>
+    <script src="/static/js/alerts/filters.js"></script>
+    <script src="/static/js/alerts/batch.js"></script>
+    <script src="/static/js/alerts/sink.js"></script>
+    <script src="/static/js/alerts/list.js"></script>
+    <script src="/static/js/alerts/index.js"></script>
+    <script src="/static/js/rules.js"></script>
+    <script src="/static/js/assets.js"></script>
+    <script src="/static/js/history.js"></script>
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

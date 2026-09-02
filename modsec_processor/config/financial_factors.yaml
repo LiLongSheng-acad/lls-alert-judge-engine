@@ -1,0 +1,124 @@
+# ============================================================
+# 金钱驱动评分模型配置文件（最终版）
+# ============================================================
+# 资产价值 = 基础资产价值 × 权重
+# 基础资产价值: 10000 元（默认）
+# 权重由用户通过 Web 界面配置
+# ============================================================
+
+# ---------- 攻击危害指数 ----------
+attack_hazard:
+  RCE:
+    CRITICAL: 10.0
+    HIGH: 7.0
+    MEDIUM: 4.0
+    LOW: 1.0
+    INFO: 0.5
+    DEFAULT: 2.0
+  COMMAND_INJECTION:
+    CRITICAL: 9.5
+    HIGH: 6.5
+    MEDIUM: 3.5
+    LOW: 0.8
+    INFO: 0.4
+    DEFAULT: 2.0
+  DESERIALIZATION:
+    CRITICAL: 9.0
+    HIGH: 6.0
+    MEDIUM: 3.0
+    LOW: 0.7
+    INFO: 0.3
+    DEFAULT: 1.8
+  SQLI:
+    CRITICAL: 8.5
+    HIGH: 6.0
+    MEDIUM: 3.5
+    LOW: 0.8
+    INFO: 0.4
+    DEFAULT: 1.8
+  LFI:
+    CRITICAL: 7.5
+    HIGH: 5.5
+    MEDIUM: 3.0
+    LOW: 0.7
+    INFO: 0.3
+    DEFAULT: 1.5
+  RFI:
+    CRITICAL: 7.0
+    HIGH: 5.0
+    MEDIUM: 3.0
+    LOW: 0.7
+    INFO: 0.3
+    DEFAULT: 1.5
+  XSS:
+    CRITICAL: 6.5
+    HIGH: 4.5
+    MEDIUM: 2.5
+    LOW: 0.6
+    INFO: 0.3
+    DEFAULT: 1.2
+  SSTI:
+    CRITICAL: 8.0
+    HIGH: 5.5
+    MEDIUM: 3.0
+    LOW: 0.7
+    INFO: 0.3
+    DEFAULT: 1.6
+  FILE_UPLOAD:
+    CRITICAL: 6.0
+    HIGH: 4.0
+    MEDIUM: 2.0
+    LOW: 0.5
+    INFO: 0.2
+    DEFAULT: 1.0
+  SSRF:
+    CRITICAL: 6.0
+    HIGH: 4.0
+    MEDIUM: 2.0
+    LOW: 0.5
+    INFO: 0.2
+    DEFAULT: 1.0
+  OPEN_REDIRECT:
+    CRITICAL: 5.0
+    HIGH: 3.5
+    MEDIUM: 1.5
+    LOW: 0.4
+    INFO: 0.2
+    DEFAULT: 0.8
+  PROTOCOL:
+    CRITICAL: 2.0
+    WARNING: 0.5
+    INFO: 0.1
+    DEFAULT: 0.3
+  GENERIC:
+    CRITICAL: 1.5
+    WARNING: 0.3
+    INFO: 0.1
+    DEFAULT: 0.2
+  UNKNOWN:
+    CRITICAL: 1.0
+    HIGH: 0.8
+    MEDIUM: 0.5
+    LOW: 0.2
+    INFO: 0.1
+    DEFAULT: 0.3
+  DEFAULT:
+    DEFAULT: 0.5
+
+# ---------- 基础资产价值 ----------
+# 所有资产价值的基数，用户配置的权重将乘以这个值
+base_asset_value: 10000
+
+# ---------- 默认权重 ----------
+# 未配置资产的 IP 使用的默认权重
+default_weight: 1.0
+
+# ---------- 人力成本 ----------
+labor_cost:
+  monthly_salary: 20000
+  hours_per_month: 160
+  minutes_per_alert: 15
+
+# ---------- 决策阈值 ----------
+ignore_threshold: 0.01
+max_score: 1000000

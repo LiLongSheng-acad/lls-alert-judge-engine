@@ -1,0 +1,17 @@
+{
+  "assets": [
+    {
+      "id": "asset_20260901071800_b28c1c",
+      "identifier": "10.8.0.1",
+      "name": "test",
+      "base_weight": 2.0,
+      "temp_weight": null,
+      "temp_expire_at": null,
+      "owner": "test",
+      "remark": "test",
+      "enabled": true,
+      "created_at": "2026-09-01T07:18:00.315255",
+      "updated_at": "2026-09-01T07:18:07.683531"
+    }
+  ]
+}
