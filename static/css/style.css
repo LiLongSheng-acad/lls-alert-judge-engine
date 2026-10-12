@@ -1,0 +1,27 @@
+/* ========== 全局样式 ========== */
+.priority-high { color: #dc3545; font-weight: bold; }
+.priority-med { color: #fd7e14; font-weight: bold; }
+.priority-low { color: #28a745; }
+.stats-card { transition: all 0.2s; }
+.stats-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+.log-time { font-family: monospace; font-size: 0.85rem; color: #6c757d; }
+.alert-row:hover { background: #f8f9fa; }
+.filter-section { background: #f1f3f5; padding: 12px 16px; border-radius: 8px; }
+.filter-label { font-size: 0.75rem; color: #6c757d; margin-bottom: 2px; }
+.filter-input { width: 150px; }
+.filter-input-sm { width: 120px; }
+.raw-log { background: #212529; color: #f8f9fa; padding: 12px; border-radius: 6px; font-size: 0.8rem; max-height: 200px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; word-break: break-all; }
+.detail-modal .modal-dialog { max-width: 800px; }
+.nav-tabs .nav-link { color: #495057; }
+.nav-tabs .nav-link.active { font-weight: bold; }
+.temp-badge { background: #ff6b6b; color: white; font-size: 0.6rem; padding: 2px 6px; border-radius: 4px; margin-left: 4px; }
+.checkbox-col { width: 30px; }
+.batch-bar { background: #e9ecef; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; display: none; }
+.batch-bar.show { display: flex; align-items: center; gap: 10px; }
+.template-select { min-width: 180px; }
+.user-dropdown .dropdown-toggle::after { display: inline-block; margin-left: 4px; }
+@media (max-width: 768px) {
+    .filter-input, .filter-input-sm { width: 100%; }
+    .filter-section .col-auto { padding: 4px 0; }
+    .batch-bar { flex-wrap: wrap; }
+}
