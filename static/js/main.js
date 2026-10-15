@@ -4,6 +4,8 @@
 
 // 全局模式变量
 var currentMode = 'monitor';
+// 视图：main=主视图（默认）/ internal=内网源视图（源 IP 命中豁免规则）
+var currentView = 'main';
 
 // ----- 告警详情 -----
 async function showDetail(alertId) {
@@ -37,7 +39,7 @@ async function showDetail(alertId) {
                         <tr><th>方法</th><td>${escapeHtml(d.method || '-')}</td></tr>
                         <tr><th>攻击类型</th><td><span class="badge bg-${getSeverityClass(d.severity)}">${escapeHtml(d.attack_type || 'UNKNOWN')}</span></td></tr>
                         <tr><th>严重等级</th><td><span class="badge bg-${getSeverityClass(d.severity)}">${escapeHtml(d.severity || 'INFO')}</span></td></tr>
-                        <tr><th>优先级分数</th><td class="${getPriorityColor(d.priority_score)}">${d.priority_score !== undefined ? d.priority_score.toFixed(1) : '-'}</td></tr>
+                        <tr><th>优先级分数</th><td class="${getPriorityColor(d.priority_score, d.below_red_line)}">${d.priority_score !== undefined ? d.priority_score.toFixed(1) : '-'}</td></tr>
                         <tr><th>状态</th><td>${d.is_blocked ? '<span class="badge bg-secondary">已沉底</span>' : '<span class="badge bg-danger">待处理</span>'}</td></tr>
                     </table>
                 </div>
@@ -46,6 +48,21 @@ async function showDetail(alertId) {
                     <div class="raw-log">${escapeHtml(d.payload || '(无)')}</div>
                 </div>
             </div>
+            ${(d.hidden_by && d.hidden_by.length) ? `
+            <hr>
+            <div class="mb-2"><strong>命中规则（本条被以下规则隐去）</strong></div>
+            <table class="table table-sm">
+                <thead><tr><th>规则ID</th><th>条件</th><th>作用域</th><th>创建人</th><th>原因</th></tr></thead>
+                <tbody>
+                    ${d.hidden_by.map(x => `<tr>
+                        <td><code>${escapeHtml(x.rule_id || '-')}</code></td>
+                        <td>${escapeHtml(x.field || '-')} ${escapeHtml(x.operator || '')} <code>${escapeHtml(x.value || '')}</code></td>
+                        <td>${escapeHtml(x.scope || 'personal')}</td>
+                        <td>${escapeHtml(x.creator || '-')}</td>
+                        <td>${escapeHtml(x.reason || '-')}</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>` : ''}
             <hr>
             <div class="mb-2"><strong>原始日志</strong></div>
             <div class="raw-log" style="max-height:300px;">${escapeHtml(d.raw_message || '(无)')}</div>
@@ -94,6 +111,19 @@ function setMode(mode) {
         badge.textContent = mode === 'monitor' ? '监控模式' : '调查模式';
         badge.className = `badge ${mode === 'monitor' ? 'bg-primary' : 'bg-warning text-dark'}`;
     }
+    currentPage = 1;
+    loadAlerts();
+}
+
+// ----- 视图切换：主视图 / 内网源 / 排查中 -----
+const VIEW_IDS = { main: 'viewMain', internal: 'viewInternal', processing: 'viewProcessing' };
+
+function setView(view) {
+    currentView = view;
+    Object.keys(VIEW_IDS).forEach(v => {
+        const el = document.getElementById(VIEW_IDS[v]);
+        if (el) el.className = `btn btn-outline-${v === view ? 'primary active' : 'secondary'}`;
+    });
     currentPage = 1;
     loadAlerts();
 }
@@ -174,6 +204,7 @@ function changePageSize() {
 window.showDetail = showDetail;
 window.queryByIp = queryByIp;
 window.setMode = setMode;
+window.setView = setView;
 window.changePage = changePage;
 window.changePageSize = changePageSize;
 window.currentPage = currentPage;

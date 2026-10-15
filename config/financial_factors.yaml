@@ -1,124 +1,128 @@
 # ============================================================
-# 金钱驱动评分模型配置文件（最终版）
+# 评分模型配置（单次损失模型）
 # ============================================================
-# 资产价值 = 基础资产价值 × 权重
-# 基础资产价值: 10000 元（默认）
-# 权重由用户通过 Web 界面配置
+# 优先级 = 单次漏洞损失(元) × 目标权重
+#   - 单次漏洞损失：见下方 attack_loss 表（每种攻击类型 × 等级 → 元）
+#   - 目标权重：仅表达系统重要性，约定在 0.5 ~ 3 之间小幅摆动
+#   - 红线 red_line：优先级低于它 → 「看了就亏」（可以不看，但照常展示、标绿）
+#
+# 表值为「示意默认值」，按护网 / 众测分级比例推导，可由甲方按现场校准。
 # ============================================================
 
-# ---------- 攻击危害指数 ----------
-attack_hazard:
+# ---------- 单次漏洞损失（单位：元）----------
+# 等级相对系数：CRITICAL 1 · HIGH 0.5 · MEDIUM 0.1 · LOW 0.02 · INFO 0.002
+# 每个类型保留 DEFAULT 兜底行（漏配等级 / 未知等级时回落到它）
+attack_loss:
   RCE:
-    CRITICAL: 10.0
-    HIGH: 7.0
-    MEDIUM: 4.0
-    LOW: 1.0
-    INFO: 0.5
-    DEFAULT: 2.0
+    CRITICAL: 500000
+    HIGH: 250000
+    MEDIUM: 50000
+    LOW: 10000
+    INFO: 1000
+    DEFAULT: 50000
   COMMAND_INJECTION:
-    CRITICAL: 9.5
-    HIGH: 6.5
-    MEDIUM: 3.5
-    LOW: 0.8
-    INFO: 0.4
-    DEFAULT: 2.0
+    CRITICAL: 500000
+    HIGH: 250000
+    MEDIUM: 50000
+    LOW: 10000
+    INFO: 1000
+    DEFAULT: 50000
   DESERIALIZATION:
-    CRITICAL: 9.0
-    HIGH: 6.0
-    MEDIUM: 3.0
-    LOW: 0.7
-    INFO: 0.3
-    DEFAULT: 1.8
-  SQLI:
-    CRITICAL: 8.5
-    HIGH: 6.0
-    MEDIUM: 3.5
-    LOW: 0.8
-    INFO: 0.4
-    DEFAULT: 1.8
-  LFI:
-    CRITICAL: 7.5
-    HIGH: 5.5
-    MEDIUM: 3.0
-    LOW: 0.7
-    INFO: 0.3
-    DEFAULT: 1.5
-  RFI:
-    CRITICAL: 7.0
-    HIGH: 5.0
-    MEDIUM: 3.0
-    LOW: 0.7
-    INFO: 0.3
-    DEFAULT: 1.5
-  XSS:
-    CRITICAL: 6.5
-    HIGH: 4.5
-    MEDIUM: 2.5
-    LOW: 0.6
-    INFO: 0.3
-    DEFAULT: 1.2
+    CRITICAL: 400000
+    HIGH: 200000
+    MEDIUM: 40000
+    LOW: 8000
+    INFO: 800
+    DEFAULT: 40000
   SSTI:
-    CRITICAL: 8.0
-    HIGH: 5.5
-    MEDIUM: 3.0
-    LOW: 0.7
-    INFO: 0.3
-    DEFAULT: 1.6
+    CRITICAL: 400000
+    HIGH: 200000
+    MEDIUM: 40000
+    LOW: 8000
+    INFO: 800
+    DEFAULT: 40000
+  SQLI:
+    CRITICAL: 300000
+    HIGH: 150000
+    MEDIUM: 30000
+    LOW: 6000
+    INFO: 600
+    DEFAULT: 30000
+  LFI:
+    CRITICAL: 250000
+    HIGH: 125000
+    MEDIUM: 25000
+    LOW: 5000
+    INFO: 500
+    DEFAULT: 25000
+  RFI:
+    CRITICAL: 250000
+    HIGH: 125000
+    MEDIUM: 25000
+    LOW: 5000
+    INFO: 500
+    DEFAULT: 25000
+  # 多词标签会被适配器统一为下划线形式：attack-file-upload → FILE_UPLOAD
   FILE_UPLOAD:
-    CRITICAL: 6.0
-    HIGH: 4.0
-    MEDIUM: 2.0
-    LOW: 0.5
-    INFO: 0.2
-    DEFAULT: 1.0
+    CRITICAL: 250000
+    HIGH: 125000
+    MEDIUM: 25000
+    LOW: 5000
+    INFO: 500
+    DEFAULT: 25000
   SSRF:
-    CRITICAL: 6.0
-    HIGH: 4.0
-    MEDIUM: 2.0
-    LOW: 0.5
-    INFO: 0.2
-    DEFAULT: 1.0
+    CRITICAL: 150000
+    HIGH: 75000
+    MEDIUM: 15000
+    LOW: 3000
+    INFO: 300
+    DEFAULT: 15000
+  XSS:
+    CRITICAL: 50000
+    HIGH: 25000
+    MEDIUM: 5000
+    LOW: 1000
+    INFO: 100
+    DEFAULT: 5000
   OPEN_REDIRECT:
-    CRITICAL: 5.0
-    HIGH: 3.5
-    MEDIUM: 1.5
-    LOW: 0.4
-    INFO: 0.2
-    DEFAULT: 0.8
-  PROTOCOL:
-    CRITICAL: 2.0
-    WARNING: 0.5
-    INFO: 0.1
-    DEFAULT: 0.3
-  GENERIC:
-    CRITICAL: 1.5
-    WARNING: 0.3
-    INFO: 0.1
-    DEFAULT: 0.2
+    CRITICAL: 10000
+    HIGH: 5000
+    MEDIUM: 1000
+    LOW: 200
+    INFO: 20
+    DEFAULT: 1000
   UNKNOWN:
-    CRITICAL: 1.0
-    HIGH: 0.8
-    MEDIUM: 0.5
-    LOW: 0.2
-    INFO: 0.1
-    DEFAULT: 0.3
+    CRITICAL: 5000
+    HIGH: 2500
+    MEDIUM: 500
+    LOW: 100
+    INFO: 10
+    DEFAULT: 500
+  # 扫描 / 探测类：本身不是漏洞，价值极低（不随等级变化）
+  PROTOCOL:
+    DEFAULT: 0.5
+  GENERIC:
+    DEFAULT: 0.5
+  # 全局兜底：攻击类型完全未知时
   DEFAULT:
     DEFAULT: 0.5
 
-# ---------- 基础资产价值 ----------
-# 所有资产价值的基数，用户配置的权重将乘以这个值
-base_asset_value: 10000
-
 # ---------- 默认权重 ----------
-# 未配置资产的 IP 使用的默认权重
+# 未配置资产的 IP 使用的权重（目标权重约定范围 0.5 ~ 3）
 default_weight: 1.0
 
 # ---------- 人力成本 ----------
+# 仅作参考：红线「看了就亏」的直觉来自「单条处置成本」。
 labor_cost:
   monthly_salary: 20000
   hours_per_month: 160
   minutes_per_alert: 15
 
 # ---------- 决策阈值 ----------
-ignore_threshold: 0.01
-max_score: 1000000
+# 红线：优先级(=单次漏洞损失 × 目标权重) 低于该值时，视为「看了就亏」。
+# 语义：可以不看，但告警照常入库、照常展示（仅标绿，不隐藏、不沉底）。
+# 这是指导值，可按甲方现场调整。
+red_line: 30
+
+# 分数封顶（安全网，防止异常值）
+max_score: 10000000

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 main.py - 告警采集引擎（支持文件轮转检测）
-version 0.3.0
+version 0.4.0
 """
 import os
 import sys

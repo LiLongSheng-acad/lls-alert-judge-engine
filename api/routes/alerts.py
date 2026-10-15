@@ -8,12 +8,13 @@ import json
 from datetime import datetime
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, Cookie, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config.settings import CONFIG_DIR, COOKIE_USER_KEY
 from lib.validator import InputValidator
 from storage.db import get_conn
+from engine.scorer import load_red_line, load_loss_table_keys
 from api.common import ApiResponse, server_error
 
 router = APIRouter()
@@ -45,9 +46,17 @@ class AlertListRequest(BaseModel):
     sort: str = "-priority_score"
     ignore_filters: bool = False
     aggregate: bool = False
+    view: str = Field(default="main", description="视图: main（主视图）/ internal（内网源）/ processing（排查中）")
     filters: Optional[AlertFilters] = None
     time_from: Optional[str] = None
     time_to: Optional[str] = None
+
+    @field_validator('view')
+    @classmethod
+    def validate_view(cls, v):
+        if v not in ('main', 'internal', 'processing'):
+            raise ValueError('view 必须是 main / internal / processing')
+        return v
 
 
 class AlertDetailRequest(BaseModel):
@@ -104,43 +113,68 @@ def load_rules(user: str) -> dict:
         return result
 
 
-def build_rule_filter_sql(rules: list) -> tuple:
-    """构建规则过滤 SQL（字段经白名单映射，避免把未知字段拼成非法列名）"""
-    if not rules:
+def rule_condition(rule: dict) -> tuple:
+    """单条规则 -> (SQL 条件, 参数)。字段经白名单映射，未知字段返回空。"""
+    column = RULE_FIELD_COLUMN.get(rule.get('field'))
+    operator = rule.get('operator')
+    value = rule.get('value')
+    if not column or value in (None, ''):
         return "", []
+    # COALESCE 避免列值为 NULL 时 NOT(cond) 因三值逻辑误伤正常告警
+    expr = f"COALESCE({column}, '')"
+    # src_ip 且值为 CIDR 网段时，用 ip_in_cidr 判定
+    if rule.get('field') == 'src_ip' and '/' in str(value):
+        return "ip_in_cidr(COALESCE(src_ip, ''), ?)", [value]
+    if operator == 'exact':
+        return f"{expr} = ?", [value]
+    if operator == 'contains':
+        return f"{expr} LIKE ?", [f"%{value}%"]
+    if operator == 'startswith':
+        return f"{expr} LIKE ?", [f"{value}%"]
+    if operator == 'endswith':
+        return f"{expr} LIKE ?", [f"%{value}"]
+    if operator == 'regex':
+        return f"{expr} REGEXP ?", [value]
+    return "", []
+
+
+def build_rule_filter_sql(rules: list) -> tuple:
+    """多规则 -> 读取层过滤用的 "NOT (... OR ...)" 片段"""
     conditions = []
     params = []
     for rule in rules:
-        column = RULE_FIELD_COLUMN.get(rule.get('field'))
-        operator = rule.get('operator')
-        value = rule.get('value')
-        if not column or value in (None, ''):
-            continue
-        # COALESCE 避免列值为 NULL 时 NOT(cond) 因三值逻辑误伤正常告警
-        expr = f"COALESCE({column}, '')"
-        # src_ip 且值为 CIDR 网段时，用 ip_in_cidr 判定（与 RuleProvider 原语义一致）
-        if rule.get('field') == 'src_ip' and '/' in str(value):
-            conditions.append("ip_in_cidr(COALESCE(src_ip, ''), ?)")
-            params.append(value)
-            continue
-        if operator == 'exact':
-            conditions.append(f"{expr} = ?")
-            params.append(value)
-        elif operator == 'contains':
-            conditions.append(f"{expr} LIKE ?")
-            params.append(f"%{value}%")
-        elif operator == 'startswith':
-            conditions.append(f"{expr} LIKE ?")
-            params.append(f"{value}%")
-        elif operator == 'endswith':
-            conditions.append(f"{expr} LIKE ?")
-            params.append(f"%{value}")
-        elif operator == 'regex':
-            conditions.append(f"{expr} REGEXP ?")
-            params.append(value)
+        cond, ps = rule_condition(rule)
+        if cond:
+            conditions.append(cond)
+            params.extend(ps)
     if conditions:
         return "NOT (" + " OR ".join(conditions) + ")", params
     return "", []
+
+
+def build_rule_match_sql(rules: list) -> tuple:
+    """多规则 -> 正向匹配 "(cond1 OR cond2 ...)"，用于统计「被规则隐去」的数量"""
+    conditions = []
+    params = []
+    for rule in rules:
+        cond, ps = rule_condition(rule)
+        if cond:
+            conditions.append(cond)
+            params.extend(ps)
+    if conditions:
+        return "(" + " OR ".join(conditions) + ")", params
+    return "", []
+
+
+def split_rules_by_intent(rules: list) -> tuple:
+    """按 intent 拆分规则 -> (sink 沉底规则, exempt 内网源豁免规则)。
+
+    历史规则没有 intent 字段，一律视为 sink（保持原有行为）。
+    """
+    sink, exempt = [], []
+    for rule in rules:
+        (exempt if rule.get('intent') == 'exempt' else sink).append(rule)
+    return sink, exempt
 
 
 # ============================================================
@@ -176,6 +210,7 @@ async def handle_alerts(
             "sort": "str",
             "page": "int",
             "size": "int",
+            "view": "str",
         }
     )
 
@@ -188,12 +223,12 @@ async def handle_alerts(
         return await list_alerts(req, user)
     elif action == "detail":
         req = AlertDetailRequest(**validated)
-        return await detail_alert(req)
+        return await detail_alert(req, user)
     elif action == "stats":
         req = AlertStatsRequest(**validated)
-        return await stats_alerts(req)
+        return await stats_alerts(req, user)
     elif action == "report":
-        return await report_alerts(validated)
+        return await report_alerts(validated, user)
     else:
         raise HTTPException(status_code=400, detail=f"未知的 action: {action}")
 
@@ -203,6 +238,7 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
     try:
         conn = get_conn()
         cursor = conn.cursor()
+        red_line = load_red_line()
 
         where_clauses = []
         params = []
@@ -215,8 +251,8 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
             where_clauses.append("log_time <= ?")
             params.append(req.time_to)
 
-        # 监控模式：过滤已沉底告警
-        if not req.ignore_filters:
+        # 监控模式：过滤已沉底告警（「排查中」是独立透镜，不受此限）
+        if not req.ignore_filters and req.view != 'processing':
             where_clauses.append("is_blocked = 0")
 
         # 其他过滤条件
@@ -262,17 +298,37 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
                 where_clauses.append("severity = ?")
                 params.append(f['severity'])
 
-        # 规则过滤
-        if not req.ignore_filters:
-            rules = load_rules(user)
-            global_sql, global_params = build_rule_filter_sql(rules.get('global', []))
-            if global_sql:
-                where_clauses.append(global_sql)
-                params.extend(global_params)
-            personal_sql, personal_params = build_rule_filter_sql(rules.get('personal', []))
-            if personal_sql:
-                where_clauses.append(personal_sql)
-                params.extend(personal_params)
+        # ---- 视图分流 + 规则过滤 ----
+        # 规则按「意图」分两类（缺省视为 sink）：
+        #   sink   —— 沉底规则：命中即从主视图隐去；仅在「监控模式」下生效
+        #   exempt —— 内网源豁免：命中即划入「内网源视图」，始终从主视图移出
+        # 注意：豁免是「分区」不是「沉底」——统计口径不分离，仍计入 total / rule_sunk。
+        rules = load_rules(user)
+        active_rules = rules.get('global', []) + rules.get('personal', [])
+        sink_rules, exempt_rules = split_rules_by_intent(active_rules)
+
+        if req.view == 'internal':
+            # 内网源视图：只保留豁免规则命中的告警
+            match_sql, match_params = build_rule_match_sql(exempt_rules)
+            if match_sql:
+                where_clauses.append(match_sql)
+                params.extend(match_params)
+            else:
+                where_clauses.append("1 = 0")  # 未配置任何豁免规则 → 视图为空
+        elif req.view == 'processing':
+            # 排查中视图：只看被标记为「在办」的告警（不分沉底状态、不受规则影响）
+            where_clauses.append("is_processed = 1")
+        else:
+            # 主视图：豁免命中的告警始终移出
+            exempt_sql, exempt_params = build_rule_filter_sql(exempt_rules)
+            if exempt_sql:
+                where_clauses.append(exempt_sql)
+                params.extend(exempt_params)
+            if not req.ignore_filters:
+                sink_sql, sink_params = build_rule_filter_sql(sink_rules)
+                if sink_sql:
+                    where_clauses.append(sink_sql)
+                    params.extend(sink_params)
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
@@ -298,7 +354,8 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
                     COUNT(*) as cnt,
                     MAX(priority_score) as max_priority_score,
                     MIN(log_time) as first_log_time,
-                    MAX(log_time) as last_log_time
+                    MAX(log_time) as last_log_time,
+                    MAX(is_processed) as has_processing
                 FROM modsec_alerts
                 WHERE {where_sql}
                 GROUP BY src_ip, dest_ip, attack_type, COALESCE(uri, '')
@@ -323,6 +380,7 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
                 src_ip, dest_ip, uri, attack_type = row[0], row[1], row[2], row[3]
                 sev_rank, cnt, max_score = row[4], row[5], row[6]
                 first_t, last_t = row[7], row[8]
+                has_processing = row[9]
                 # 样例取「最高优先级」那条，保证与行上展示的分数/等级一致
                 cursor.execute(f"""
                     SELECT alert_id FROM modsec_alerts
@@ -344,6 +402,8 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
                     "severity": SEVERITY_BY_RANK.get(sev_rank, "INFO"),
                     "count": cnt,
                     "max_priority_score": max_score or 0.0,
+                    "below_red_line": (max_score or 0.0) < red_line,
+                    "has_processing": bool(has_processing),
                     "first_log_time": first_t or "",
                     "last_log_time": last_t or "",
                     "sample_alert_id": (sample[0] if sample else "") or "",
@@ -366,7 +426,7 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
             sql = f"""
                 SELECT 
                     alert_id, src_ip, dest_ip, uri, method,
-                    attack_type, severity, priority_score, log_time
+                    attack_type, severity, priority_score, log_time, is_processed
                 FROM modsec_alerts
                 WHERE {where_sql}
                 ORDER BY priority_score DESC
@@ -391,7 +451,9 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
                     "attack_type": row[5] or "UNKNOWN",
                     "severity": row[6] or "INFO",
                     "priority_score": row[7] or 0.0,
+                    "below_red_line": (row[7] or 0.0) < red_line,
                     "log_time": row[8] or "",
+                    "is_processed": row[9] or 0,
                 })
             conn.close()
             return ApiResponse(
@@ -413,7 +475,7 @@ async def list_alerts(req: AlertListRequest, user: str) -> ApiResponse:
             conn.close()
 
 
-async def detail_alert(req: AlertDetailRequest) -> ApiResponse:
+async def detail_alert(req: AlertDetailRequest, user: str) -> ApiResponse:
     conn = None
     try:
         conn = get_conn()
@@ -422,14 +484,37 @@ async def detail_alert(req: AlertDetailRequest) -> ApiResponse:
             SELECT 
                 alert_id, src_ip, dest_ip, uri, method,
                 attack_type, severity, priority_score,
-                payload, raw_message, log_time
+                payload, raw_message, log_time, is_blocked
             FROM modsec_alerts
             WHERE alert_id = ?
         """, (req.alert_id,))
         row = cursor.fetchone()
-        conn.close()
         if not row:
+            conn.close()
             return ApiResponse(code=404, msg=f"告警 {req.alert_id} 不存在")
+
+        # 按需归因：实时计算哪些（当前用户可见的）规则会隐去这条告警（不落字段）
+        hidden_by = []
+        rules = load_rules(user)
+        for rule in rules.get('global', []) + rules.get('personal', []):
+            cond, ps = rule_condition(rule)
+            if not cond:
+                continue
+            cursor.execute(
+                f"SELECT 1 FROM modsec_alerts WHERE alert_id = ? AND {cond} LIMIT 1",
+                [req.alert_id] + ps)
+            if cursor.fetchone():
+                hidden_by.append({
+                    "rule_id": rule.get('id', ''),
+                    "field": rule.get('field', ''),
+                    "operator": rule.get('operator', ''),
+                    "value": rule.get('value', ''),
+                    "scope": rule.get('scope', 'personal'),
+                    "creator": rule.get('creator', ''),
+                    "reason": rule.get('reason', ''),
+                    "expire_at": rule.get('expire_at', ''),
+                })
+        conn.close()
         return ApiResponse(
             code=0,
             msg="success",
@@ -442,9 +527,12 @@ async def detail_alert(req: AlertDetailRequest) -> ApiResponse:
                 "attack_type": row[5] or "UNKNOWN",
                 "severity": row[6] or "INFO",
                 "priority_score": row[7] or 0.0,
+                "below_red_line": (row[7] or 0.0) < load_red_line(),
                 "payload": row[8] or "",
                 "raw_message": row[9] or "",
                 "log_time": row[10] or "",
+                "is_blocked": row[11] or 0,
+                "hidden_by": hidden_by,
             }
         )
     except Exception as e:
@@ -454,16 +542,30 @@ async def detail_alert(req: AlertDetailRequest) -> ApiResponse:
             conn.close()
 
 
-async def stats_alerts(req: AlertStatsRequest) -> ApiResponse:
+async def stats_alerts(req: AlertStatsRequest, user: str) -> ApiResponse:
     conn = None
     try:
         conn = get_conn()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM modsec_alerts")
         total = cursor.fetchone()[0]
+        # 动作沉底：显式标记 is_blocked=1
         cursor.execute("SELECT COUNT(*) FROM modsec_alerts WHERE is_blocked = 1")
-        blocked = cursor.fetchone()[0]
-        pending = max(total - blocked, 0)
+        action_sunk = cursor.fetchone()[0]
+        # 规则沉底：未标记 is_blocked，但被当前用户可见的规则在读取层隐去
+        rules = load_rules(user)
+        rule_match, rule_params = build_rule_match_sql(
+            rules.get('global', []) + rules.get('personal', []))
+        if rule_match:
+            cursor.execute(
+                f"SELECT COUNT(*) FROM modsec_alerts WHERE is_blocked = 0 AND {rule_match}",
+                rule_params)
+            rule_sunk = cursor.fetchone()[0]
+        else:
+            rule_sunk = 0
+        sunk_total = action_sunk + rule_sunk
+        # 真实待处理 = 既没被动作沉底、也没被规则隐去
+        pending = max(total - sunk_total, 0)
         cursor.execute("SELECT COUNT(*) FROM modsec_alerts WHERE date(log_time) = date('now', 'localtime')")
         today = cursor.fetchone()[0]
         cursor.execute("""
@@ -480,7 +582,11 @@ async def stats_alerts(req: AlertStatsRequest) -> ApiResponse:
             data={
                 "total": total,
                 "pending": pending,
-                "blocked": blocked,
+                "action_sunk": action_sunk,
+                "rule_sunk": rule_sunk,
+                "sunk_total": sunk_total,
+                "blocked": sunk_total,
+                "sunk_ratio": round(sunk_total / total, 4) if total else 0.0,
                 "today": today,
                 "top_attack_types": top_types,
             }
@@ -492,10 +598,13 @@ async def stats_alerts(req: AlertStatsRequest) -> ApiResponse:
             conn.close()
 
 
-async def report_alerts(validated: Dict[str, Any]) -> ApiResponse:
+async def report_alerts(validated: Dict[str, Any], user: str) -> ApiResponse:
     """
-    日报统计（只报真实存在的状态）：
-      总告警 / 已沉底 / 剩余未研判
+    日报统计：
+      总告警 / 动作沉底 / 规则沉底 / 剩余未研判 / 沉底占比
+      + 规则维度明细（每条规则在区间内的隐去量）
+      + 未分类攻击类型（损失表未配置的类型 → 交由管理员评判后补录）
+    口径说明：规则维度为「按当前规则重算」，非历史实际值。
     时间范围默认当天，可按 log_time 指定起止。
     """
     time_from = validated.get("time_from")
@@ -509,16 +618,63 @@ async def report_alerts(validated: Dict[str, Any]) -> ApiResponse:
     try:
         conn = get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT COUNT(*) FROM modsec_alerts WHERE log_time >= ? AND log_time <= ?",
-            (time_from, time_to)
-        )
+        rng = "log_time >= ? AND log_time <= ?"
+        rng_params = [time_from, time_to]
+
+        cursor.execute(f"SELECT COUNT(*) FROM modsec_alerts WHERE {rng}", rng_params)
         total = cursor.fetchone()[0]
         cursor.execute(
-            "SELECT COUNT(*) FROM modsec_alerts WHERE log_time >= ? AND log_time <= ? AND is_blocked = 1",
-            (time_from, time_to)
-        )
-        blocked = cursor.fetchone()[0]
+            f"SELECT COUNT(*) FROM modsec_alerts WHERE {rng} AND is_blocked = 1", rng_params)
+        action_sunk = cursor.fetchone()[0]
+
+        active_rules = load_rules(user)
+        active_rules = active_rules.get('global', []) + active_rules.get('personal', [])
+        rule_match, rule_params = build_rule_match_sql(active_rules)
+        if rule_match:
+            cursor.execute(
+                f"SELECT COUNT(*) FROM modsec_alerts WHERE {rng} AND is_blocked = 0 AND {rule_match}",
+                rng_params + rule_params)
+            rule_sunk = cursor.fetchone()[0]
+        else:
+            rule_sunk = 0
+
+        sunk_total = action_sunk + rule_sunk
+        remaining = max(total - sunk_total, 0)
+
+        # 规则维度：逐条规则统计区间内隐去量
+        by_rule = []
+        for rule in active_rules:
+            cond, ps = rule_condition(rule)
+            if not cond:
+                continue
+            cursor.execute(
+                f"SELECT COUNT(*) FROM modsec_alerts WHERE {rng} AND is_blocked = 0 AND {cond}",
+                rng_params + ps)
+            by_rule.append({
+                "rule_id": rule.get('id', ''),
+                "field": rule.get('field', ''),
+                "operator": rule.get('operator', ''),
+                "value": rule.get('value', ''),
+                "scope": rule.get('scope', 'personal'),
+                "creator": rule.get('creator', ''),
+                "hidden_count": cursor.fetchone()[0],
+            })
+        by_rule.sort(key=lambda x: -x["hidden_count"])
+
+        # 未分类攻击类型：区间内出现过、但损失表尚未配置的类型
+        # 按当前 yaml 判定——甲方补录配置后，该类型会自动移出本清单
+        known_types = load_loss_table_keys()
+        unclassified = []
+        if known_types:
+            cursor.execute(
+                f"SELECT attack_type, COUNT(*) FROM modsec_alerts WHERE {rng} "
+                f"GROUP BY attack_type", rng_params)
+            for attack_type, cnt in cursor.fetchall():
+                name = (attack_type or "UNKNOWN").upper()
+                if name not in known_types:
+                    unclassified.append({"attack_type": name, "count": cnt})
+            unclassified.sort(key=lambda x: -x["count"])
+
         conn.close()
         return ApiResponse(
             code=0,
@@ -527,8 +683,14 @@ async def report_alerts(validated: Dict[str, Any]) -> ApiResponse:
                 "time_from": time_from,
                 "time_to": time_to,
                 "total": total,
-                "blocked": blocked,
-                "remaining": max(total - blocked, 0),
+                "action_sunk": action_sunk,
+                "rule_sunk": rule_sunk,
+                "sunk_total": sunk_total,
+                "blocked": sunk_total,
+                "remaining": remaining,
+                "sunk_ratio": round(sunk_total / total, 4) if total else 0.0,
+                "by_rule": by_rule,
+                "unclassified": unclassified,
             }
         )
     except Exception as e:

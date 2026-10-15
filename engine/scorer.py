@@ -3,12 +3,13 @@
 scorer.py - 优先级评分引擎（金钱驱动模型）
 
 核心公式：
-    优先级分数 = (资产价值 × 攻击危害指数) / 单条告警处置成本
+    优先级分数 = 单次漏洞损失(元) × 目标权重
 
-资产价值 = base_asset_value × weight
-    - base_asset_value: 从配置文件读取，默认 100000
-    - weight: 用户通过 Web 配置的资产权重，未配置则使用 default_weight
-    - 资产按「目的 IP / Host」（dest_ip）匹配，即被攻击的目标系统
+    - 单次漏洞损失：查配置 attack_loss 表（攻击类型 × 等级 → 元）
+    - 目标权重：仅表达系统重要性，约定在 0.5 ~ 3 之间小幅摆动；
+      按「目的 IP / Host」（dest_ip）匹配，未配置则用 default_weight
+
+红线：优先级 < red_line → 「看了就亏」——可以不看，但告警照常入库、照常展示（仅标绿）
 """
 import sys
 import os
@@ -45,6 +46,34 @@ def normalize_host(value: str) -> str:
     return host
 
 
+def load_red_line() -> float:
+    """独立读取红线（供读取层归类用）；文件缺失/非法时回退 30。
+
+    读取层用它把「潜在损失 < 红线」的告警标记为「看了就亏」——
+    分数本身照实存盘，因此调整红线不会改写历史。
+    """
+    try:
+        with open(str(FINANCIAL_FACTORS_FILE), 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        return float(cfg.get("red_line", 30))
+    except Exception:
+        return 30.0
+
+
+def load_loss_table_keys() -> set:
+    """独立读取损失表里已配置的攻击类型（供读取层识别「未分类类型」）。
+
+    每次调用都重新读取文件，因此甲方改完 yaml 立即生效，无需重启。
+    """
+    try:
+        with open(str(FINANCIAL_FACTORS_FILE), 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        table = cfg.get("attack_loss", {}) or {}
+        return {str(k).upper() for k in table.keys() if str(k).upper() != "DEFAULT"}
+    except Exception:
+        return set()
+
+
 class Scorer:
     """基于金钱驱动模型的评分引擎"""
 
@@ -54,20 +83,20 @@ class Scorer:
 
         self.config_path = config_path
         self.config = self._load_config(config_path)
-        # 编译攻击危害指数矩阵
-        self._compile_hazard_matrix()
+        self._config_mtime = self._get_mtime()
+        # 编译单次损失表
+        self._compile_loss_table()
         self._log_config_summary()
 
     # ==================== 配置加载 ====================
 
     def _load_config(self, path: str) -> Dict:
         default_config = {
-            "attack_hazard": {"DEFAULT": {"DEFAULT": 0.5}},
-            "base_asset_value": 100000,
+            "attack_loss": {"DEFAULT": {"DEFAULT": 0.5}},
             "default_weight": 1.0,
             "labor_cost": {"monthly_salary": 20000, "hours_per_month": 160, "minutes_per_alert": 15},
-            "ignore_threshold": 0.01,
-            "max_score": 1000000,
+            "red_line": 30,
+            "max_score": 10000000,
         }
         try:
             with open(path, 'r') as f:
@@ -86,52 +115,68 @@ class Scorer:
             logger.error(f"YAML 解析失败: {e}，使用默认配置")
             return default_config
 
+    # ==================== 热加载 ====================
+
+    def _get_mtime(self) -> float:
+        try:
+            return os.path.getmtime(self.config_path)
+        except OSError:
+            return 0.0
+
+    def _maybe_reload(self):
+        """配置文件被改动时自动重载（改 yaml 后无需重启服务）。"""
+        mtime = self._get_mtime()
+        if mtime and mtime != self._config_mtime:
+            self.config = self._load_config(self.config_path)
+            self._compile_loss_table()
+            self._config_mtime = mtime
+            logger.info(f"评分配置已热加载: {self.config_path}")
+
     # ==================== 规则编译 ====================
 
-    def _compile_hazard_matrix(self):
-        hazard_config = self.config.get("attack_hazard", {})
-        self.hazard_matrix: Dict[str, Dict[str, float]] = {}
-        for attack_type, severity_map in hazard_config.items():
+    def _compile_loss_table(self):
+        loss_config = self.config.get("attack_loss", {})
+        self.loss_table: Dict[str, Dict[str, float]] = {}
+        for attack_type, severity_map in loss_config.items():
             if attack_type == "DEFAULT":
                 continue
             if isinstance(severity_map, dict):
-                self.hazard_matrix[attack_type.upper()] = {
+                self.loss_table[attack_type.upper()] = {
                     k.upper(): float(v) for k, v in severity_map.items()
                 }
             else:
-                self.hazard_matrix[attack_type.upper()] = {"DEFAULT": float(severity_map)}
-        default_config = hazard_config.get("DEFAULT", {})
+                self.loss_table[attack_type.upper()] = {"DEFAULT": float(severity_map)}
+        default_config = loss_config.get("DEFAULT", {})
         if isinstance(default_config, dict):
-            self.default_hazard = {k.upper(): float(v) for k, v in default_config.items()}
+            self.default_loss = {k.upper(): float(v) for k, v in default_config.items()}
         else:
-            self.default_hazard = {"DEFAULT": float(default_config) if default_config else 0.5}
-        logger.info(f"加载了 {len(self.hazard_matrix)} 种攻击类型的危害指数配置")
+            self.default_loss = {"DEFAULT": float(default_config) if default_config else 0.5}
+        logger.info(f"加载了 {len(self.loss_table)} 种攻击类型的单次损失配置")
 
     def _log_config_summary(self):
         labor = self.config.get("labor_cost", {})
         logger.info(f"人力成本: 月薪{labor.get('monthly_salary', 20000)}元, "
                     f"月工时{labor.get('hours_per_month', 160)}小时, "
                     f"平均处理{labor.get('minutes_per_alert', 15)}分钟/条")
-        logger.info(f"忽略阈值: {self.config.get('ignore_threshold', 0.01)}, "
-                    f"最大分数: {self.config.get('max_score', 1000000)}")
-        logger.info(f"基础资产价值: {self.config.get('base_asset_value', 100000)}, "
-                    f"默认权重: {self.config.get('default_weight', 1.0)}")
+        logger.info(f"红线(看了就亏): {self._get_red_line()}, "
+                    f"最大分数: {self.config.get('max_score', 10000000)}")
+        logger.info(f"默认权重: {self.config.get('default_weight', 1.0)}")
 
     # ==================== 核心计算 ====================
 
     def compute(self, schema) -> float:
-        """计算优先级分数（资产按目的 IP/Host 匹配，在入库时算定）"""
-        asset_value = self._get_asset_value(getattr(schema, "dest_ip", ""))
-        hazard_index = self._get_hazard_index(schema.attack_type, schema.severity)
-        potential_loss = asset_value * hazard_index
-        cost_per_alert = self._get_cost_per_alert()
-        if potential_loss <= 0 or cost_per_alert <= 0:
+        """计算优先级分数 = 单次漏洞损失(元) × 目标权重（入库时算定）。
+
+        是否「看了就亏」由读取层用红线比对（见 load_red_line），
+        因此分数入库即定，事后调整红线不会改写历史分数。
+        """
+        self._maybe_reload()
+        loss = self._get_loss(schema.attack_type, schema.severity)
+        weight = self._get_target_weight(getattr(schema, "dest_ip", ""))
+        score = loss * weight
+        if score <= 0:
             return 0.0
-        score = potential_loss / cost_per_alert
-        threshold = self.config.get("ignore_threshold", 0.01)
-        if score < threshold:
-            return 0.0
-        max_score = self.config.get("max_score", 1000000)
+        max_score = self.config.get("max_score", 10000000)
         return round(min(score, max_score), 2)
 
     # ==================== 辅助方法 ====================
@@ -194,13 +239,8 @@ class Scorer:
 
         return None
 
-    def _get_asset_value(self, host: str) -> float:
-        """
-        计算资产价值 = base_asset_value × weight
-        weight 优先使用资产权重（临时权重在有效期内优先），否则使用 default_weight
-        """
-        base_value = float(self.config.get("base_asset_value", 100000))
-
+    def _get_target_weight(self, host: str) -> float:
+        """目标权重：仅表达系统重要性（临时权重在有效期内优先）；未匹配则用 default_weight。"""
         assets = self._load_assets()
         matched = self._match_asset(host, assets)
         if matched:
@@ -217,22 +257,23 @@ class Scorer:
         else:
             weight = self.config.get("default_weight", 1.0)
 
-        return base_value * float(weight)
+        return float(weight)
 
-    def _get_hazard_index(self, attack_type: str, severity: str) -> float:
+    def _get_loss(self, attack_type: str, severity: str) -> float:
+        """单次漏洞损失(元)：二维查表，两级兜底（类型 DEFAULT → 全局 DEFAULT）。"""
         attack_key = attack_type.upper() if attack_type else "UNKNOWN"
         severity_key = severity.upper() if severity else "INFO"
 
-        if attack_key in self.hazard_matrix:
-            if severity_key in self.hazard_matrix[attack_key]:
-                return self.hazard_matrix[attack_key][severity_key]
-            if "DEFAULT" in self.hazard_matrix[attack_key]:
-                return self.hazard_matrix[attack_key]["DEFAULT"]
+        if attack_key in self.loss_table:
+            if severity_key in self.loss_table[attack_key]:
+                return self.loss_table[attack_key][severity_key]
+            if "DEFAULT" in self.loss_table[attack_key]:
+                return self.loss_table[attack_key]["DEFAULT"]
 
-        if severity_key in self.default_hazard:
-            return self.default_hazard[severity_key]
+        if severity_key in self.default_loss:
+            return self.default_loss[severity_key]
 
-        return self.default_hazard.get("DEFAULT", 0.5)
+        return self.default_loss.get("DEFAULT", 0.5)
 
     def _get_cost_per_alert(self) -> float:
         labor = self.config.get("labor_cost", {})
@@ -244,41 +285,42 @@ class Scorer:
         hourly_rate = monthly_salary / hours_per_month
         return hourly_rate * (minutes_per_alert / 60)
 
+    def _get_red_line(self) -> float:
+        """红线：优先级(潜在损失) 低于该值视为「看了就亏」；缺省 30，可按现场调整。"""
+        try:
+            return float(self.config.get("red_line", 30))
+        except (TypeError, ValueError):
+            return 30.0
+
     # ==================== 调试与统计 ====================
 
     def explain_score(self, schema) -> Dict[str, Any]:
-        asset_value = self._get_asset_value(getattr(schema, "dest_ip", ""))
-        hazard_index = self._get_hazard_index(schema.attack_type, schema.severity)
-        potential_loss = asset_value * hazard_index
-        cost_per_alert = self._get_cost_per_alert()
-        raw_score = potential_loss / cost_per_alert if cost_per_alert > 0 else 0
-        threshold = self.config.get("ignore_threshold", 0.01)
-        max_score = self.config.get("max_score", 1000000)
-        final_score = max(raw_score, 0)
-        is_ignored = raw_score < threshold
-        if not is_ignored:
-            final_score = min(final_score, max_score)
+        loss = self._get_loss(schema.attack_type, schema.severity)
+        weight = self._get_target_weight(getattr(schema, "dest_ip", ""))
+        score = loss * weight
+        max_score = self.config.get("max_score", 10000000)
+        final_score = round(min(max(score, 0), max_score), 2)
+        red_line = self._get_red_line()
         return {
-            "asset_value": round(asset_value, 2),
             "attack_type": schema.attack_type,
             "severity": schema.severity,
-            "hazard_index": round(hazard_index, 4),
-            "potential_loss": round(potential_loss, 2),
-            "cost_per_alert": round(cost_per_alert, 2),
-            "raw_score": round(raw_score, 2),
-            "ignore_threshold": threshold,
+            "loss": round(loss, 2),
+            "target_weight": round(weight, 3),
+            "score": round(score, 2),
+            "cost_per_alert": round(self._get_cost_per_alert(), 2),
+            "red_line": red_line,
+            "below_red_line": score < red_line,
             "max_score": max_score,
-            "final_score": round(final_score, 2),
-            "is_ignored": is_ignored,
+            "final_score": final_score,
         }
 
-    def get_hazard_matrix(self) -> Dict[str, Dict[str, float]]:
-        return self.hazard_matrix
+    def get_loss_table(self) -> Dict[str, Dict[str, float]]:
+        return self.loss_table
 
     def reload_config(self):
         logger.info("正在重新加载配置文件...")
         self.config = self._load_config(self.config_path)
-        self._compile_hazard_matrix()
+        self._compile_loss_table()
         self._log_config_summary()
         logger.info("配置重载完成")
 

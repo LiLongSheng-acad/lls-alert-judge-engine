@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 api/main.py - FastAPI 应用入口
-version 0.3.0
+version 0.4.0
 """
 import sys
 import os
@@ -30,7 +30,7 @@ assert_preflight("api")
 app = FastAPI(
     title="告警研判引擎 API",
     description="统一 POST 接口，支持告警查询、详情、统计",
-    version="0.3.0"
+    version="0.4.0"
 )
 
 # ============================================================

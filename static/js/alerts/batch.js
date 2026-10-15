@@ -11,6 +11,9 @@ function toggleSelectAll() {
 function getSelectedAlertIds() {
     const ids = [];
     document.querySelectorAll('.alert-checkbox:checked').forEach(cb => {
+        // 聚合行的勾选框是 disabled 的（其 data 里没有真实 alert_id）——
+        // 必须跳过，否则会把 fingerprint 当成 alert_id 发出去，静默匹配 0 条
+        if (cb.disabled) return;
         if (cb.dataset.alertId) ids.push(cb.dataset.alertId);
     });
     return ids;
@@ -34,24 +37,9 @@ function clearSelection() {
     updateBatchBar();
 }
 
-async function batchSink() {
+// 批量处置：统一走同一个研判弹窗（不再用 prompt 绕过留痕）
+function batchSink() {
     const ids = getSelectedAlertIds();
     if (ids.length === 0) { alert('请至少选择一条告警'); return; }
-    if (!confirm(`确定要沉底选中的 ${ids.length} 条告警吗？`)) return;
-    const reason = prompt('请输入沉底原因：') || '批量沉底';
-    try {
-        const r = await apiCall('/actions/batch', {
-            action: 'batch_sink',
-            alert_ids: ids,
-            reason: reason
-        });
-        if (r.code === 0) {
-            alert(`成功沉底 ${r.data.affected_count} 条告警`);
-            clearSelection();
-            loadAlerts();
-            loadStats();
-        } else {
-            alert('操作失败: ' + r.msg);
-        }
-    } catch (e) { alert('网络错误: ' + e.message); }
+    window.showBatchSink(ids);
 }

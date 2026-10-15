@@ -13,7 +13,7 @@ from typing import List
 # ============================================================
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 PROJECT_NAME = "告警研判引擎"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # ============================================================
 # 路径层
@@ -31,7 +31,6 @@ OFFSET_FILE = Path(os.getenv("MODSEC_OFFSET_FILE", str(LOG_DIR / "lls-alert-judg
 SINK_RULES_FILE = CONFIG_DIR / "sink_rules.json"
 BLOCKED_IPS_FILE = CONFIG_DIR / "blocked_ips.txt"
 WHITELIST_IPS_FILE = CONFIG_DIR / "whitelist_ips.txt"
-TEMP_BLACKLIST_DIR = CONFIG_DIR / "temp_blacklist"
 FINANCIAL_FACTORS_FILE = CONFIG_DIR / "financial_factors.yaml"
 
 # ============================================================
@@ -82,8 +81,6 @@ if not BASIC_AUTH_USERNAME or not BASIC_AUTH_PASSWORD:
     BASIC_AUTH_USERNAME = "admin"
     BASIC_AUTH_PASSWORD = temp_password
 
-DEDUP_WINDOW = int(os.getenv("DEDUP_WINDOW", "60"))
-DEDUP_FINGERPRINT_FIELDS = ["src_ip", "attack_type", "uri"]
 COOKIE_USER_KEY = "alert_user"
 COOKIE_MAX_AGE = 86400
 
@@ -115,7 +112,7 @@ API = {
 # ============================================================
 def ensure_directories():
     required_dirs = [
-        LOG_DIR, CONFIG_DIR, STATIC_DIR, TEMP_BLACKLIST_DIR,
+        LOG_DIR, CONFIG_DIR, STATIC_DIR,
         SYSLOG_DIR, OFFSET_FILE.parent,
     ]
     for d in required_dirs:
@@ -129,7 +126,6 @@ def get_config_summary() -> dict:
         "syslog_file": str(SYSLOG_FILE),
         "api_port": API["port"],
         "batch_size": COLLECTOR["batch_size"],
-        "dedup_window": DEDUP_WINDOW,
         "basic_auth_enabled": True,
     }
 
@@ -140,10 +136,9 @@ __all__ = [
     "LOG_DIR", "CONFIG_DIR", "STATIC_DIR",
     "DB_PATH", "SYSLOG_FILE", "OFFSET_FILE", "SYSLOG_DIR",
     "SINK_RULES_FILE", "BLOCKED_IPS_FILE", "WHITELIST_IPS_FILE",
-    "TEMP_BLACKLIST_DIR", "FINANCIAL_FACTORS_FILE",
+    "FINANCIAL_FACTORS_FILE",
     "COLLECTOR", "ID_GENERATOR", "DEFAULTS",
     "BASIC_AUTH_USERNAME", "BASIC_AUTH_PASSWORD",
-    "DEDUP_WINDOW", "DEDUP_FINGERPRINT_FIELDS",
     "COOKIE_USER_KEY", "COOKIE_MAX_AGE",
     "API",
     "ensure_directories", "get_config_summary",

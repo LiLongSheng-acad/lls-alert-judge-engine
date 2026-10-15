@@ -33,19 +33,54 @@ class SinkRequest(BaseModel):
     action: str = Field(default="sink", description="操作类型")
     alert_id: str = Field(..., description="告警ID")
     mode: str = Field(..., description="single 或 ip_temp")
-    reason: str = Field(..., description="沉底原因")
+    verdict: str = Field(default="ignore", description="研判结论: ignore 忽略 / investigate 排查 / block 封堵")
+    reason: str = Field(default="", description="理由（仅「忽略」需要二级说明）")
     create_rule: bool = Field(default=False, description="是否创建临时规则")
 
 
 class BatchSinkRequest(BaseModel):
     action: str = "batch_sink"
     alert_ids: list = Field(..., description="告警ID列表")
-    reason: str = Field(default="批量沉底", description="沉底原因")
+    verdict: str = Field(default="ignore", description="研判结论")
+    reason: str = Field(default="", description="理由")
 
 
 # ============================================================
 # 辅助函数
 # ============================================================
+
+# ---- 研判结论（verdict）----
+# 一线对一条告警只有三个动作，且三者的下游痕迹完全不同：
+#   ignore      忽略 —— 结案：从主视图移出（沉底）。**只有它需要理由**
+#                       （因为只有它能凭空让告警消失），二级为枚举值。
+#   investigate 排查 —— 在办：同样从主视图移出，但**不进规则**（个案排查，不是"这类都别看"）。
+#                       下游要拉人、沟通、截图，痕迹比封堵还重 → 系统不再要说明。
+#                       保留 is_processed 标记 → 可用「排查中」视图找回；**分数也保留**（仍按优先级排）。
+#   block       封堵 —— 结案：从主视图移出（避免已封 IP 刷屏）。
+#                       下游要与外界沟通并发截图，证据在系统外 → 系统不再要说明。
+VALID_VERDICTS = ("ignore", "investigate", "block")
+
+VERDICT_EFFECT = {
+    "ignore": "is_blocked = 1, priority_score = -1.0",
+    "investigate": "is_blocked = 1, is_processed = 1",
+    "block": "is_blocked = 1, priority_score = -1.0",
+}
+VERDICT_MSG = {"ignore": "已忽略", "investigate": "已标记排查", "block": "已登记封堵"}
+
+
+def normalize_verdict(v) -> str:
+    return v if v in VALID_VERDICTS else "ignore"
+
+
+def verdict_effect(verdict: str) -> str:
+    """结论 -> UPDATE 的 SET 片段（取自常量表，无注入面）"""
+    return VERDICT_EFFECT[verdict]
+
+
+def is_closing(verdict: str) -> bool:
+    """忽略 / 封堵 = 结案（可沉底、可建临时规则）；排查 = 在办"""
+    return verdict != "investigate"
+
 
 def create_temp_rule(ip: str, reason: str, operator: str) -> Optional[str]:
     """创建临时规则（24小时过期，个人规则）
@@ -81,7 +116,9 @@ def create_temp_rule(ip: str, reason: str, operator: str) -> Optional[str]:
         "creator": operator,
         "reason": f"临时沉底: {reason}",
         "expire_at": (datetime.now() + timedelta(hours=24)).isoformat(),
-        "enabled": True
+        "enabled": True,
+        "created_at": datetime.now().isoformat(),
+        "retired_at": None
     }
     rules.append(new_rule)
 
@@ -120,6 +157,7 @@ async def sink_alert(
         rules={
             "alert_id": "str",
             "mode": "str",
+            "verdict": "str",
             "reason": "str",
             "create_rule": "bool",
         }
@@ -142,19 +180,22 @@ async def sink_alert(
         affected_count = 0
         rule_id = None
 
+        verdict = normalize_verdict(req.verdict)
+        effect = verdict_effect(verdict)
+
         if req.mode == "single":
             cursor.execute(
-                "UPDATE modsec_alerts SET is_blocked = 1, priority_score = -1.0 WHERE alert_id = ?",
+                f"UPDATE modsec_alerts SET {effect} WHERE alert_id = ?",
                 (req.alert_id,)
             )
             affected_count = 1
         elif req.mode == "ip_temp":
             cursor.execute(
-                "UPDATE modsec_alerts SET is_blocked = 1, priority_score = -1.0 WHERE src_ip = ? AND is_blocked = 0",
+                f"UPDATE modsec_alerts SET {effect} WHERE src_ip = ? AND is_blocked = 0",
                 (src_ip,)
             )
             affected_count = cursor.rowcount
-            if req.create_rule and affected_count > 0:
+            if req.create_rule and affected_count > 0 and is_closing(verdict):
                 rule_id = create_temp_rule(src_ip, req.reason, user)
         else:
             conn.close()
@@ -163,13 +204,14 @@ async def sink_alert(
         conn.commit()
         conn.close()
 
-        write_sink_audit(user, "sink", req.mode, src_ip, req.alert_id, req.reason, affected_count, rule_id)
+        write_sink_audit(user, verdict, req.mode, src_ip, req.alert_id, req.reason, affected_count, rule_id)
 
         return ApiResponse(
             code=0,
-            msg="沉底成功",
+            msg=VERDICT_MSG[verdict],
             data={
                 "mode": req.mode,
+                "verdict": verdict,
                 "src_ip": src_ip,
                 "affected_count": affected_count,
                 "rule_id": rule_id
@@ -197,6 +239,7 @@ async def batch_sink(
     validated = InputValidator.validate_and_clean(
         req_data,
         rules={
+            "verdict": "str",
             "reason": "str",
         }
     )
@@ -211,21 +254,22 @@ async def batch_sink(
         conn = get_conn()
         cursor = conn.cursor()
 
+        verdict = normalize_verdict(req.verdict)
         placeholders = ','.join(['?'] * len(req.alert_ids))
         cursor.execute(
-            f"UPDATE modsec_alerts SET is_blocked = 1, priority_score = -1.0 WHERE alert_id IN ({placeholders})",
+            f"UPDATE modsec_alerts SET {verdict_effect(verdict)} WHERE alert_id IN ({placeholders})",
             req.alert_ids
         )
         affected = cursor.rowcount
         conn.commit()
         conn.close()
 
-        write_sink_audit(user, "batch_sink", "batch", "multiple", ",".join(req.alert_ids[:3]), req.reason, affected, None)
+        write_sink_audit(user, verdict, "batch", "multiple", ",".join(req.alert_ids[:3]), req.reason, affected, None)
 
         return ApiResponse(
             code=0,
-            msg=f"成功沉底 {affected} 条告警",
-            data={"affected_count": affected}
+            msg=f"{VERDICT_MSG[verdict]}（{affected} 条）",
+            data={"affected_count": affected, "verdict": verdict}
         )
 
     except Exception as e:
@@ -260,6 +304,7 @@ async def aggregate_sink(
             "src_ip": "ip",
             "attack_type": "str",
             "uri": "str",
+            "verdict": "str",
             "reason": "str",
         }
     )
@@ -267,7 +312,8 @@ async def aggregate_sink(
     src_ip = validated.get("src_ip")
     attack_type = validated.get("attack_type")
     uri = validated.get("uri")
-    reason = validated.get("reason", "聚合沉底")
+    verdict = normalize_verdict(validated.get("verdict"))
+    reason = validated.get("reason", "")
 
     if not src_ip or not attack_type:
         return ApiResponse(code=400, msg="缺少 src_ip 或 attack_type")
@@ -277,15 +323,16 @@ async def aggregate_sink(
         conn = get_conn()
         cursor = conn.cursor()
 
+        effect = verdict_effect(verdict)
         if uri:
             cursor.execute(
-                "UPDATE modsec_alerts SET is_blocked = 1, priority_score = -1.0 "
+                f"UPDATE modsec_alerts SET {effect} "
                 "WHERE src_ip = ? AND attack_type = ? AND COALESCE(uri, '') = ? AND is_blocked = 0",
                 (src_ip, attack_type, uri)
             )
         else:
             cursor.execute(
-                "UPDATE modsec_alerts SET is_blocked = 1, priority_score = -1.0 "
+                f"UPDATE modsec_alerts SET {effect} "
                 "WHERE src_ip = ? AND attack_type = ? AND (uri IS NULL OR uri = '') AND is_blocked = 0",
                 (src_ip, attack_type)
             )
@@ -294,13 +341,13 @@ async def aggregate_sink(
         conn.commit()
         conn.close()
 
-        write_sink_audit(user, "aggregate_sink", "aggregate", src_ip, 
+        write_sink_audit(user, verdict, "aggregate", src_ip,
                         f"{attack_type}|{uri}", reason, affected_count, None)
 
         return ApiResponse(
             code=0,
-            msg=f"聚合沉底成功，影响 {affected_count} 条告警",
-            data={"affected_count": affected_count}
+            msg=f"{VERDICT_MSG[verdict]}（{affected_count} 条）",
+            data={"affected_count": affected_count, "verdict": verdict}
         )
 
     except Exception as e:
@@ -326,13 +373,15 @@ async def ip_sink(
         req_data,
         rules={
             "src_ip": "ip",
+            "verdict": "str",
             "reason": "str",
             "create_rule": "bool",
         }
     )
 
     src_ip = validated.get("src_ip")
-    reason = validated.get("reason", "IP批量沉底")
+    verdict = normalize_verdict(validated.get("verdict"))
+    reason = validated.get("reason", "")
     create_rule = validated.get("create_rule", False)
 
     if not src_ip:
@@ -344,7 +393,7 @@ async def ip_sink(
         cursor = conn.cursor()
 
         cursor.execute(
-            "UPDATE modsec_alerts SET is_blocked = 1, priority_score = -1.0 WHERE src_ip = ? AND is_blocked = 0",
+            f"UPDATE modsec_alerts SET {verdict_effect(verdict)} WHERE src_ip = ? AND is_blocked = 0",
             (src_ip,)
         )
         affected_count = cursor.rowcount
@@ -352,16 +401,17 @@ async def ip_sink(
         conn.close()
 
         rule_id = None
-        if create_rule and affected_count > 0:
+        if create_rule and affected_count > 0 and is_closing(verdict):
             rule_id = create_temp_rule(src_ip, reason, user)
 
-        write_sink_audit(user, "ip_sink", "ip_batch", src_ip, "batch", reason, affected_count, rule_id)
+        write_sink_audit(user, verdict, "ip_batch", src_ip, "batch", reason, affected_count, rule_id)
 
         return ApiResponse(
             code=0,
-            msg=f"IP批量沉底成功，影响 {affected_count} 条告警",
+            msg=f"{VERDICT_MSG[verdict]}（{affected_count} 条）",
             data={
                 "affected_count": affected_count,
+                "verdict": verdict,
                 "rule_id": rule_id
             }
         )

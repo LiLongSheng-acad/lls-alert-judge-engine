@@ -145,7 +145,17 @@ class ModSecAdapter(BaseAdapter):
                         schema.attacks.append(attack_info)
 
             # --- 选择主要攻击类型 ---
-            priority_order = ['XSS', 'SQLI', 'RCE', 'LFI', 'RFI', 'PHPI', 'HTTP', 'SESS']
+            # 按「单次损失」从高到低排列，与 config/financial_factors.yaml 的 attack_loss 对应
+            priority_order = [
+                'RCE', 'COMMAND_INJECTION', 'DESERIALIZATION', 'SSTI',
+                'SQLI',
+                'LFI', 'RFI', 'FILE', 'FILE_UPLOAD',
+                'SSRF',
+                'XSS',
+                'OPEN_REDIRECT',
+                'UNKNOWN',
+                'PROTOCOL', 'GENERIC',
+            ]
             primary = None
 
             for priority_type in priority_order:
@@ -220,10 +230,12 @@ class ModSecAdapter(BaseAdapter):
             result['payload'] = match.group(1)[:500]
 
         # 从 tags 中提取 attack_type
+        # 统一命名：attack-file-upload → FILE_UPLOAD（多词标签的 - 转 _）
+        # （与 config/financial_factors.yaml 的 attack_loss 键保持一致）
         tags = re.findall(r'\[tag\s+"([^"]+)"\]', msg_text)
         for tag in tags:
             if tag.startswith('attack-'):
-                result['attack_type'] = tag.replace('attack-', '').upper()
+                result['attack_type'] = tag.replace('attack-', '').upper().replace('-', '_')
                 break
 
         return result

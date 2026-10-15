@@ -83,12 +83,12 @@ function formatTime(t) {
     } catch { return t; }
 }
 
-function getPriorityColor(score) {
+// 优先级着色：低于红线 = 看了就亏（可以不看）→ 绿；高于红线 → 红
+function getPriorityColor(score, belowRedLine) {
     if (score === null || score === undefined) return '';
     if (score < 0) return 'text-secondary';
-    if (score > 1000) return 'text-danger fw-bold';
-    if (score > 500) return 'text-warning fw-bold';
-    return 'text-success';
+    if (belowRedLine) return 'text-success';
+    return 'text-danger fw-bold';
 }
 
 function formatLocal(date) {

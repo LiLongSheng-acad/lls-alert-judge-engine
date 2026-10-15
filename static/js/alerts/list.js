@@ -21,6 +21,13 @@ function buildAlertsPage() {
                         <button type="button" class="btn btn-outline-secondary" id="modeInvestigate" onclick="setMode('investigate')">🔍 调查</button>
                     </div>
                 </div>
+                <div class="col-auto">
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-primary active" id="viewMain" onclick="setView('main')">🌐 全部</button>
+                        <button type="button" class="btn btn-outline-secondary" id="viewInternal" onclick="setView('internal')">🏠 内网源</button>
+                        <button type="button" class="btn btn-outline-secondary" id="viewProcessing" onclick="setView('processing')">🔎 排查中</button>
+                    </div>
+                </div>
                 <div class="col-auto"><div class="filter-label">源IP</div><input type="text" class="form-control form-control-sm filter-input" id="filterSrcIP" placeholder="精确IP 或 10. 前缀"></div>
                 <div class="col-auto"><div class="filter-label">目的IP</div><input type="text" class="form-control form-control-sm filter-input" id="filterDstIP" placeholder="精确IP 或 192.168. 前缀"></div>
                 <div class="col-auto"><div class="filter-label">攻击类型</div><input type="text" class="form-control form-control-sm filter-input-sm" id="filterAttackType" placeholder="XSS"></div>
@@ -76,7 +83,7 @@ function buildAlertsPage() {
         <!-- 批量操作栏 -->
         <div class="batch-bar" id="batchBar">
             <span class="text-muted small" id="selectedCount">已选 0 条</span>
-            <button class="btn btn-danger btn-sm" onclick="batchSink()">⬇️ 批量沉底</button>
+            <button class="btn btn-danger btn-sm" onclick="batchSink()">⬇️ 批量处置</button>
             <button class="btn btn-outline-secondary btn-sm" onclick="clearSelection()">取消选择</button>
         </div>
 
@@ -159,6 +166,7 @@ async function loadAlerts() {
             size: currentSize,
             ignore_filters: ignoreSink,
             aggregate: aggregate,
+            view: (typeof currentView !== 'undefined' ? currentView : 'main'),
             filters: {}
         };
 
@@ -192,20 +200,25 @@ async function loadAlerts() {
             if (aggregated) {
                 return `
                     <tr class="alert-row">
-                        <td><input type="checkbox" class="alert-checkbox" data-alert-id="${item.fingerprint}"></td>
+                        <td><input type="checkbox" class="alert-checkbox" disabled title="聚合行代表多条告警，不支持按 ID 批量处置 —— 请用本行的「聚合处置」"></td>
                         <td><code class="small">${item.fingerprint || '-'}</code></td>
                         <td><strong>${item.src_ip || '-'}</strong></td>
                         <td>${item.dest_ip || '-'}</td>
                         <td class="small">${item.uri || '-'}</td>
                         <td><span class="badge bg-${getSeverityClass(item.severity)}">${item.attack_type || 'UNKNOWN'}</span></td>
                         <td><span class="badge bg-${getSeverityClass(item.severity)}">${item.severity || 'INFO'}</span></td>
-                        <td class="${getPriorityColor(item.max_priority_score)}">${item.max_priority_score !== undefined ? item.max_priority_score.toFixed(1) : '-'}</td>
-                        <td><span class="badge bg-info">${item.count} 次</span></td>
+                        <td class="${getPriorityColor(item.max_priority_score, item.below_red_line)}">${item.max_priority_score !== undefined ? item.max_priority_score.toFixed(1) : '-'}</td>
+                        <td><span class="badge bg-info">${item.count} 次</span>${item.has_processing ? ' <span class="badge bg-warning text-dark">排查中</span>' : ''}</td>
                         <td class="log-time">${formatTime(item.last_log_time)}</td>
                         <td>
                             <button class="btn btn-outline-primary btn-sm" onclick="showDetail('${detailId}')">详情</button>
-                            <button class="btn btn-outline-danger btn-sm sink-btn" onclick="showAggregateSink('${item.fingerprint}')">聚合沉底</button>
-                            <button class="btn btn-outline-warning btn-sm sink-btn" onclick="showIpSink('${item.src_ip}')">IP批量沉底</button>
+                            <button class="btn btn-outline-danger btn-sm sink-btn"
+                                    data-src="${escapeHtml(item.src_ip)}"
+                                    data-dst="${escapeHtml(item.dest_ip)}"
+                                    data-uri="${escapeHtml(item.uri)}"
+                                    data-type="${escapeHtml(item.attack_type)}"
+                                    onclick="showAggregateSink(this)">聚合处置</button>
+                            <button class="btn btn-outline-warning btn-sm sink-btn" onclick="showIpSink('${item.src_ip}')">IP批量处置</button>
                         </td>
                     </tr>
                 `;
@@ -219,12 +232,16 @@ async function loadAlerts() {
                         <td class="small">${item.uri || '-'}</td>
                         <td><span class="badge bg-${getSeverityClass(item.severity)}">${item.attack_type || 'UNKNOWN'}</span></td>
                         <td><span class="badge bg-${getSeverityClass(item.severity)}">${item.severity || 'INFO'}</span></td>
-                        <td class="${getPriorityColor(item.priority_score)}">${item.priority_score !== undefined ? item.priority_score.toFixed(1) : '-'}</td>
-                        <td>${item.is_blocked ? '<span class="badge bg-secondary">已沉底</span>' : '<span class="badge bg-danger">待处理</span>'}</td>
+                        <td class="${getPriorityColor(item.priority_score, item.below_red_line)}">${item.priority_score !== undefined ? item.priority_score.toFixed(1) : '-'}</td>
+                        <td>${item.is_blocked
+                            ? '<span class="badge bg-secondary">已沉底</span>'
+                            : (item.is_processed
+                                ? '<span class="badge bg-warning text-dark">排查中</span>'
+                                : '<span class="badge bg-danger">待处理</span>')}</td>
                         <td class="log-time">${formatTime(item.log_time)}</td>
                         <td>
                             <button class="btn btn-outline-primary btn-sm" onclick="showDetail('${detailId}')">详情</button>
-                            ${!item.is_blocked ? `<button class="btn btn-outline-danger btn-sm sink-btn" onclick="showSink('${item.alert_id}')">沉底</button>` : ''}
+                            ${!item.is_blocked ? `<button class="btn btn-outline-danger btn-sm sink-btn" onclick="showSink('${item.alert_id}')">处置</button>` : ''}
                         </td>
                     </tr>
                 `;

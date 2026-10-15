@@ -25,9 +25,12 @@ function buildHistoryPage() {
                     <option value="delete">删除</option>
                     <option value="enable">启用</option>
                     <option value="disable">禁用</option>
-                    <option value="sink">沉底</option>
-                    <option value="ip_sink">IP批量沉底</option>
-                    <option value="aggregate_sink">聚合沉底</option>
+                    <option value="ignore">忽略</option>
+                    <option value="investigate">排查</option>
+                    <option value="block">封堵</option>
+                    <option value="sink">沉底（旧）</option>
+                    <option value="ip_sink">IP批量沉底（旧）</option>
+                    <option value="aggregate_sink">聚合沉底（旧）</option>
                 </select>
             </div>
             <div class="col-auto">
@@ -64,9 +67,12 @@ function getHistoryActionLabel(action) {
         'delete': '删除',
         'enable': '启用',
         'disable': '禁用',
-        'sink': '沉底',
-        'ip_sink': 'IP批量沉底',
-        'aggregate_sink': '聚合沉底',
+        'ignore': '忽略',
+        'investigate': '排查',
+        'block': '封堵',
+        'sink': '沉底（旧）',
+        'ip_sink': 'IP批量沉底（旧）',
+        'aggregate_sink': '聚合沉底（旧）',
         'update': '更新'
     };
     return map[action] || action;
@@ -78,6 +84,9 @@ function getHistoryActionBadge(action) {
         'delete': 'bg-danger',
         'enable': 'bg-primary',
         'disable': 'bg-secondary',
+        'ignore': 'bg-secondary',
+        'investigate': 'bg-warning text-dark',
+        'block': 'bg-danger',
         'sink': 'bg-warning text-dark',
         'ip_sink': 'bg-info text-dark',
         'aggregate_sink': 'bg-light text-dark',

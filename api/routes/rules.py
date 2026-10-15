@@ -30,6 +30,7 @@ class RuleListRequest(BaseModel):
     action: str = "list"
     page: int = Field(default=1, ge=1)
     size: int = Field(default=20, ge=1, le=100)
+    show_retired: bool = Field(default=False, description="是否包含已注销的规则版本")
 
 
 class RuleCreateRequest(BaseModel):
@@ -38,8 +39,20 @@ class RuleCreateRequest(BaseModel):
     operator: str = Field(..., description="操作符")
     value: str = Field(..., description="匹配值")
     scope: str = Field(default="personal", description="作用域: global / personal")
+    intent: str = Field(default="sink", description="意图: sink（沉底）/ exempt（内网源豁免）")
     reason: str = Field(..., description="沉底原因")
     expire_at: str = Field(..., description="过期时间")
+
+    @field_validator('intent')
+    @classmethod
+    def validate_intent(cls, v, info: ValidationInfo):
+        if v not in ['sink', 'exempt']:
+            raise ValueError('intent 必须是 sink 或 exempt')
+        # exempt（内网源豁免）影响所有人，必须是全局规则；
+        # 而创建全局规则本身已要求管理员（见 create_rule）
+        if v == 'exempt' and (info.data or {}).get('scope') != 'global':
+            raise ValueError('exempt（内网源豁免）必须是全局规则（scope=global）')
+        return v
 
     @field_validator('field')
     @classmethod
@@ -171,6 +184,7 @@ async def handle_rules(
             "operator": "str",
             "value": "str",
             "scope": "str",
+            "intent": "str",
             "reason": "str",
             "expire_at": "str",
             "rule_id": "str",
@@ -198,10 +212,15 @@ async def list_rules(req: RuleListRequest, user: str) -> ApiResponse:
     all_rules = load_rules_from_file()
     filtered = []
     for r in all_rules:
+        # 规则版本化：已注销（retired）的旧版本默认隐藏，仍可查（show_retired）
+        if r.get('retired_at') and not req.show_retired:
+            continue
         if r.get('scope') == 'global':
             filtered.append(r)
         elif r.get('creator') == user:
             filtered.append(r)
+    # 历史规则无 intent 字段 → 对外统一按 sink（沉底）呈现，不落盘改写
+    filtered = [{**r, 'intent': r.get('intent', 'sink')} for r in filtered]
     total = len(filtered)
     start = (req.page - 1) * req.size
     end = start + req.size
@@ -227,16 +246,21 @@ async def create_rule(req: RuleCreateRequest, user: str, client_ip: str) -> ApiR
         "operator": req.operator,
         "value": req.value,
         "scope": req.scope,
+        "intent": req.intent,
         "creator": creator,
         "reason": req.reason,
         "expire_at": req.expire_at,
-        "enabled": True
+        "enabled": True,
+        "created_at": datetime.now().isoformat(),
+        "retired_at": None
     }
     rules = load_rules_from_file()
     rules.append(new_rule)
     if not save_rules_to_file(rules):
         return ApiResponse(code=500, msg="保存规则失败")
-    write_rule_audit(user, "create", rule_id, f"field={req.field}, value={req.value}, scope={req.scope}", new_rule, client_ip)
+    write_rule_audit(user, "create", rule_id,
+                     f"intent={req.intent}, field={req.field}, value={req.value}, scope={req.scope}",
+                     new_rule, client_ip)
     return ApiResponse(code=0, msg="规则创建成功", data={"rule_id": rule_id})
 
 
@@ -254,11 +278,14 @@ async def delete_rule(req: RuleDeleteRequest, user: str, client_ip: str) -> ApiR
             return ApiResponse(code=403, msg="只有管理员可以删除全局规则")
     elif found.get('creator') != user:
         return ApiResponse(code=403, msg="只能删除自己创建的规则")
-    new_rules = [r for r in rules if r.get('id') != req.rule_id]
-    if not save_rules_to_file(new_rules):
+    # 规则版本化：注销（软删）——保留记录并标记 retired_at，默认不再生效
+    # 语义：规则不可变，修改 = 注销旧版本 + 新建新版本
+    found['enabled'] = False
+    found['retired_at'] = datetime.now().isoformat()
+    if not save_rules_to_file(rules):
         return ApiResponse(code=500, msg="保存规则失败")
-    write_rule_audit(user, "delete", req.rule_id, f"field={found.get('field')}, value={found.get('value')}", found, client_ip)
-    return ApiResponse(code=0, msg=f"规则 {req.rule_id} 已删除")
+    write_rule_audit(user, "delete", req.rule_id, f"注销: field={found.get('field')}, value={found.get('value')}", found, client_ip)
+    return ApiResponse(code=0, msg=f"规则 {req.rule_id} 已注销")
 
 
 async def toggle_rule(req: RuleToggleRequest, user: str, client_ip: str) -> ApiResponse:

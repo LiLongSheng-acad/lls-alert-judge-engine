@@ -41,8 +41,8 @@ class AssetCreateRequest(BaseModel):
     action: str = "create"
     identifier: str = Field(..., description="资产标识")
     name: str = Field(..., description="资产名称")
-    base_weight: float = Field(..., ge=0.1, le=100)
-    temp_weight: Optional[float] = Field(None, ge=0.1, le=100)
+    base_weight: float = Field(..., ge=0.5, le=3)
+    temp_weight: Optional[float] = Field(None, ge=0.5, le=3)
     temp_expire_at: Optional[str] = None
     owner: Optional[str] = None
     remark: Optional[str] = None
@@ -54,8 +54,8 @@ class AssetUpdateRequest(BaseModel):
     asset_id: str = Field(..., description="资产 ID")
     identifier: Optional[str] = None
     name: Optional[str] = None
-    base_weight: Optional[float] = Field(None, ge=0.1, le=100)
-    temp_weight: Optional[float] = Field(None, ge=0.1, le=100)
+    base_weight: Optional[float] = Field(None, ge=0.5, le=3)
+    temp_weight: Optional[float] = Field(None, ge=0.5, le=3)
     temp_expire_at: Optional[str] = None
     owner: Optional[str] = None
     remark: Optional[str] = None
